@@ -28,7 +28,7 @@ void add_history(char* unused){}
 typedef struct lval{
   int type;
   union{
-    long num;
+    double num;
     char* err;
   };
   char* sym;
@@ -39,7 +39,7 @@ typedef struct lval{
 // ----- forward declarations -----
 
 int count_nodes(mpc_ast_t* t);
-lval* lval_num(long x);
+lval* lval_num(double x);
 lval* lval_err(char* m);
 lval* lval_sym(char* s);
 lval* lval_sexpr(void);
@@ -71,7 +71,7 @@ int main(int argc, char** argv){
 
   mpca_lang(MPCA_LANG_DEFAULT,
     "                                              \
-      num   : /-?[0-9]+/ ;                         \
+      num   : /-?[0-9]+(.[0-9]+)?/ ;             \
       sym   : '+' | '-' | '*' | '/' | '%' | '^' ;  \
       sexpr : '(' <expr>* ')' ;                    \
       expr  : <num> | <sym> | <sexpr> ;            \
@@ -131,7 +131,7 @@ int count_nodes(mpc_ast_t* t){
 // ----- actually important functions ----- //
 
 // constructor for lval_num
-lval* lval_num(long x){
+lval* lval_num(double x){
   lval* v = malloc(sizeof(lval));
   v->type = LVAL_NUM;
   v->num = x;
@@ -180,10 +180,10 @@ void lval_del(lval* v){
   free(v);
 }
 
-// aux function to ensure proper strtol conversion
+// aux function to ensure proper strtod conversion
 lval* lval_read_num(mpc_ast_t* t){
   errno = 0;
-  long x = strtol(t->contents, NULL, 10);
+  double x = strtod(t->contents, NULL);
   return errno != ERANGE ? lval_num(x) : lval_err("baka! invalid num");
 }
 
@@ -228,7 +228,7 @@ void lval_expr_print(lval* v, char open, char close){
 // prints lvalues based on their type, the lion doesn't concern himself with error handling
 void lval_print(lval* v){
   switch(v->type){
-    case LVAL_NUM:   printf("%li", v->num); break;
+    case LVAL_NUM:   printf("%lf", v->num); break;
     case LVAL_ERR:   printf("baka! %s", v->err); break;
     case LVAL_SYM:   printf("%s", v->sym); break;
     case LVAL_SEXPR: lval_expr_print(v, '(', ')'); break;
@@ -301,8 +301,8 @@ lval* builtin_op(lval* a, char* op){
     if(strcmp(op, "+") == 0) x->num += y->num;
     if(strcmp(op, "-") == 0) x->num -= y->num;
     if(strcmp(op, "*") == 0) x->num *= y->num;
-    if(strcmp(op, "^") == 0) x->num = (long)pow(x->num, y->num);
-    if(strcmp(op, "%") == 0) x->num = x->num % y->num;
+    if(strcmp(op, "^") == 0) x->num = pow(x->num, y->num);
+    if(strcmp(op, "%") == 0) x->num = (int)x->num % (int)y->num;
     if(strcmp(op, "/") == 0){
       if(y->num == 0){
         lval_del(x); lval_del(y);
@@ -333,7 +333,7 @@ lval eval_op(lval x, char* op, lval y){
     : lval_num(x.num / y.num);
   }
   if(strcmp(op, "%") == 0) return lval_num(x.num % y.num);
-  if(strcmp(op, "^") == 0) return lval_num((long)pow(x.num, y.num));
+  if(strcmp(op, "^") == 0) return lval_num((double)pow(x.num, y.num));
   return lval_err(LERR_BAD_OP);
 }
 
@@ -342,7 +342,7 @@ lval eval(mpc_ast_t* t){
   // if num is substring, just return the integer (nums have no children)
   if(strstr(t->tag, "num")){
     errno = 0; //check for errors to ensure conrrect conversion
-    long x = strtol(t->contents, NULL, 10);
+    double x = strtod(t->contents, NULL);
     return errno != ERANGE ? lval_num(x) : lval_err(LERR_BAD_NUM);
   }
 
