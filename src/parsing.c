@@ -1,6 +1,8 @@
 #include "mpc.h"
 
 #define BUFSIZE 2048
+#define LASSERT(args, cond, err) \
+  if (!(cond)) { lval_del(args); return lval_err(err); }
 
 #ifdef _WIN32
 
@@ -39,26 +41,40 @@ typedef struct lval{
 // ----- forward declarations -----
 
 int count_nodes(mpc_ast_t* t);
+
 lval* lval_num(double x);
 lval* lval_err(char* m);
 lval* lval_sym(char* s);
 lval* lval_sexpr(void);
+lval* lval_qexpr(void);
 void lval_del(lval* v);
+
 lval* lval_read_num(mpc_ast_t* t);
 lval* lval_read(mpc_ast_t* t);
 lval* lval_add(lval* v, lval* x);
+
 void lval_expr_print(lval* v, char open, char close);
 void lval_print(lval* v);
 void lval_println(lval* v);
+
 lval* lval_eval_sexpr(lval* v);
 lval* lval_eval(lval* v);
 lval* lval_pop(lval* v, int i);
 lval* lval_take(lval* v, int i);
+lval* lval_join(lval* x, lval* y);
+
+// builtin funcs
+lval* builtin(lval* a, char* func);
 lval* builtin_op(lval* a, char* op);
+lval* builtin_head(lval* a);
+lval* builtin_tail(lval* a);
+lval* builtin_list(lval* a);
+lval* builtin_eval(lval* a);
+lval* builtin_join(lval* a);
 //lval eval_op(lval x, char* op, lval y);
 //lval eval(mpc_ast_t* t);
 
-enum lval_types { LVAL_NUM, LVAL_ERR, LVAL_SYM, LVAL_SEXPR };
+enum lval_types { LVAL_NUM, LVAL_ERR, LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR };
 enum lval_err_types { LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM };
 
 int main(int argc, char** argv){
@@ -66,21 +82,25 @@ int main(int argc, char** argv){
   mpc_parser_t* Num = mpc_new("num");
   mpc_parser_t* Sym = mpc_new("sym");
   mpc_parser_t* Sexpr = mpc_new("sexpr");
+  mpc_parser_t* Qexpr = mpc_new("qexpr");
   mpc_parser_t* Expr = mpc_new("expr");
   mpc_parser_t* Crno = mpc_new("crno");
 
   mpca_lang(MPCA_LANG_DEFAULT,
     "                                              \
-      num   : /-?[0-9]+(.[0-9]+)?/ ;             \
-      sym   : '+' | '-' | '*' | '/' | '%' | '^' ;  \
+      num   : /-?[0-9]*\.?[0-9]+/ ;                \
+      sym   : '+' | '-' | '*' | '/' | '%' | '^'    \
+            | \"list\" | \"head\" | \"tail\"       \
+            | \"join\" | \"eval\" ;                \
       sexpr : '(' <expr>* ')' ;                    \
-      expr  : <num> | <sym> | <sexpr> ;            \
+      qexpr : '{' <expr>* '}' ;                    \
+      expr  : <num> | <sym> | <sexpr> | <qexpr> ;  \
       crno  : /^/ <expr>* /$/ ;                    \
     ",
-    Num, Sym, Sexpr, Expr, Crno);
+    Num, Sym, Sexpr, Qexpr, Expr, Crno);
 
   // interactive prompt
-  printf("Crno 9.9.9\nCTRL + C to quit\n");
+  printf("Crno v9.9.9\nCTRL + C to quit\n");
   while(1){
     char* input = readline("crno> ");
     add_history(input);
@@ -108,7 +128,7 @@ int main(int argc, char** argv){
   }
 
   // clean up the parsers
-  mpc_cleanup(5, Num, Sym, Sexpr, Expr, Crno);
+  mpc_cleanup(6, Num, Sym, Sexpr, Qexpr, Expr, Crno);
   return 0;
 }
 
@@ -165,12 +185,23 @@ lval* lval_sexpr(void){
   return v;
 }
 
+// constructor for lval_qexpr
+lval* lval_qexpr(void){
+  lval* v = malloc(sizeof(lval));
+  v->type = LVAL_QEXPR;
+  v->count = 0;
+  v->cell = NULL;
+  return v;
+}
+
 // destructor for lvalues
 void lval_del(lval* v){
   switch(v->type){
     case LVAL_NUM: break;
     case LVAL_ERR: free(v->err); break;
     case LVAL_SYM: free(v->sym); break;
+
+    case LVAL_QEXPR:
     case LVAL_SEXPR:
       for(int i = 0; i < v->count; i++)
         lval_del(v->cell[i]);
@@ -197,10 +228,16 @@ lval* lval_read(mpc_ast_t* t){
   lval* x = NULL;
   if((strcmp(t->tag, ">") == 0) || (strstr(t->tag, "sexpr"))) x = lval_sexpr();
 
+  // qexpr
+  if(strstr(t->tag, "qexpr")) x = lval_qexpr();
+
+
   // fill list with expr contained
   for(int i = 0; i < t->children_num; i++){
     if(strcmp(t->children[i]->contents, "(") == 0) continue;
     if(strcmp(t->children[i]->contents, ")") == 0) continue;
+    if(strcmp(t->children[i]->contents, "{") == 0) continue;
+    if(strcmp(t->children[i]->contents, "}") == 0) continue;
     if(strcmp(t->children[i]->tag, "regex") == 0) continue;
 
     x = lval_add(x, lval_read(t->children[i]));
@@ -232,6 +269,7 @@ void lval_print(lval* v){
     case LVAL_ERR:   printf("baka! %s", v->err); break;
     case LVAL_SYM:   printf("%s", v->sym); break;
     case LVAL_SEXPR: lval_expr_print(v, '(', ')'); break;
+    case LVAL_QEXPR: lval_expr_print(v, '{', '}'); break;
   }
 }
 
@@ -254,7 +292,7 @@ lval* lval_eval_sexpr(lval* v){
     return lval_err("baka! sexpr does not start with sym!");
   }
 
-  lval* res = builtin_op(v, f->sym);
+  lval* res = builtin(v, f->sym); //builtin deals with op
   lval_del(f);
   return res;
 }
@@ -279,6 +317,28 @@ lval* lval_take(lval* v, int i){
   lval* x = lval_pop(v, i);
   lval_del(v);
   return x;
+}
+
+lval* lval_join(lval* x, lval* y){
+  while(y->count) x = lval_add(x, lval_pop(y, 0));
+
+  lval_del(y);
+  return x;
+}
+
+// ----- builtin funcs impl -----
+
+lval* builtin(lval* a, char* func){
+  if(strcmp("list", func) == 0) return builtin_list(a);
+  if(strcmp("head", func) == 0) return builtin_head(a);
+  if(strcmp("tail", func) == 0) return builtin_tail(a);
+  if(strcmp("join", func) == 0) return builtin_join(a);
+  if(strcmp("eval", func) == 0) return builtin_eval(a);
+
+  if(strstr("+-/*%^", func)) return builtin_op(a, func);
+
+  lval_del(a);
+  return lval_err("baka! unknown fun");
 }
 
 lval* builtin_op(lval* a, char* op){
@@ -313,6 +373,51 @@ lval* builtin_op(lval* a, char* op){
     }
     lval_del(y);
   }
+  lval_del(a);
+  return x;
+}
+
+lval* builtin_head(lval* a){
+  LASSERT(a, a->count == 1, "baka! 'head' fun passed too many args!");
+  LASSERT(a, a->cell[0]->type == LVAL_QEXPR, "baka! 'head' fun passed incorrect type!");
+  LASSERT(a, a->cell[0]->count != 0, "baka! 'head' fun passed {}!");
+
+  lval* v = lval_take(a, 0);
+  while(v->count > 1) lval_del(lval_pop(v, 1));
+
+  return v;
+}
+
+lval* builtin_tail(lval* a){
+  LASSERT(a, a->count == 1, "baka! 'tail' fun passed too many args!");
+  LASSERT(a, a->cell[0]->type == LVAL_QEXPR, "baka! 'tail' fun passed incorrect type!");
+  LASSERT(a, a->cell[0]->count != 0, "baka! 'tail' fun passed {}!");
+
+  lval* v = lval_take(a, 0);
+  lval_del(lval_pop(v, 0));
+  return v;
+}
+
+lval* builtin_list(lval* a){
+  a->type = LVAL_QEXPR; // converts SExpr to QExpr, which lists it
+  return a;
+}
+
+lval* builtin_eval(lval* a){
+  LASSERT(a, a->count == 1, "baka! 'eval' fun passed too many args!");
+  LASSERT(a, a->cell[0]->type == LVAL_QEXPR, "baka! 'eval' fun passed incorrect type!");
+
+  lval* x = lval_take(a, 0);
+  x->type = LVAL_SEXPR;
+  return lval_eval(x);
+}
+
+lval* builtin_join(lval* a){
+  for(int i = 0; i < a->count; i++) LASSERT(a, a->cell[i]->type == LVAL_QEXPR, "baka! 'join' fun passed incorrect type!");
+
+  lval* x = lval_pop(a, 0);
+  while(a->count) x = lval_join(x, lval_pop(a, 0));
+
   lval_del(a);
   return x;
 }
